@@ -20,6 +20,7 @@ import boto3
 import contourpy
 import gzip
 import struct
+from pyproj import CRS, Transformer
 
 os.environ["GDAL_NUM_THREADS"] = "ALL_CPUS"
 os.environ.setdefault("TQDM_DISABLE", "1")
@@ -42,7 +43,36 @@ CONTOUR_FORMAT = "CTV2"
 INT16_MAX = 32767
 
 CLIMATOLOGY_CACHE = {}
-GRID_REMAP_CACHE = {}
+
+# ---------------------------------------------------------------------------
+# HRRR native grid (Lambert conformal, 3 km). The raw array is shipped as-is, no resampling.
+# ---------------------------------------------------------------------------
+NX, NY, DX = 1799, 1059, 3000.0
+HRRR_LCC = CRS.from_proj4("+proj=lcc +lat_1=38.5 +lat_2=38.5 +lat_0=38.5 +lon_0=-97.5 +R=6371229 +units=m +no_defs")
+_TO_LCC = Transformer.from_crs("EPSG:4326", HRRR_LCC, always_xy=True)
+_TO_LL = Transformer.from_crs(HRRR_LCC, "EPSG:4326", always_xy=True)
+X0, Y0 = _TO_LCC.transform(-122.719528, 21.138123)  # projected position of grid cell [0,0]
+
+# Lon/lat bounding box of the whole domain (for culling on the frontend)
+_xs = X0 + np.arange(NX) * DX
+_ys = Y0 + np.arange(NY) * DX
+_blon, _blat = _TO_LL.transform(
+    np.concatenate([_xs, _xs, np.full(NY, _xs[0]), np.full(NY, _xs[-1])]),
+    np.concatenate([np.full(NX, _ys[0]), np.full(NX, _ys[-1]), _ys, _ys]),
+)
+
+HRRR_GRID_META = {
+    "projection": "lambert_conformal",
+    "nx": NX, "ny": NY, "dx": DX, "dy": DX,
+    "lat_1": 38.5, "lat_2": 38.5, "lat_0": 38.5, "lon_0": -97.5,
+    "earth_radius": 6371229.0,
+    "x0": float(X0), "y0": float(Y0),          # meters, center of cell [0,0]
+    "row_order": "south_to_north",             # data row 0 = southernmost row
+    "bounds": {
+        "west": float(_blon.min()), "east": float(_blon.max()),
+        "south": float(_blat.min()), "north": float(_blat.max()),
+    },
+}
 
 # ---------------------------------------------------------------------------
 # Timing instrumentation
@@ -181,34 +211,23 @@ def _level_style(level, contours_config):
 
 
 @timed("contour_math")
-def extract_contour_levels(raw_arr_k, contours_config=None, contour_settings=None):
+def extract_contour_levels(raw_arr, lats, lons, contours_config=None, contour_settings=None):
     if not contours_config:
         return []
 
     try:
         contour_settings = contour_settings or {}
-        coarsen_stride = max(1, int(contour_settings.get("coarsen_stride", 1)))
+        stride = max(1, int(contour_settings.get("coarsen_stride", 1)))
         blur_kernel = tuple(contour_settings.get("blur_kernel", (5, 5)))
         blur_sigma = float(contour_settings.get("blur_sigma", 1.2))
 
-        working_arr = raw_arr_k.astype(np.float32)
-        if coarsen_stride > 1:
-            working_arr = cv2.resize(
-                working_arr,
-                (max(1, working_arr.shape[1] // coarsen_stride), max(1, working_arr.shape[0] // coarsen_stride)),
-                interpolation=cv2.INTER_AREA,
-            )
-
-        frame_h, frame_w = working_arr.shape
+        working_arr = raw_arr.astype(np.float32)
         smoothed = cv2.GaussianBlur(working_arr, blur_kernel, blur_sigma)
-        smoothed_flipped = np.flipud(smoothed)
-        smoothed_cyclic = np.hstack([smoothed_flipped, smoothed_flipped[:, :1]])
 
-        lon_step = 360.0 / frame_w
-        lons = np.linspace(-180.0, 180.0 + lon_step, frame_w + 1)
-        lats = np.linspace(-90.0, 90.0, frame_h)
+        # Contour directly on the native (curved) grid; x/y are the 2D lon/lat arrays.
         cont_gen = contourpy.contour_generator(
-            x=lons, y=lats, z=smoothed_cyclic,
+            x=lons[::stride, ::stride], y=lats[::stride, ::stride],
+            z=smoothed[::stride, ::stride],
             line_type=contourpy.LineType.ChunkCombinedOffset,
         )
 
@@ -288,39 +307,23 @@ def normalize_array(raw_arr, param_config):
 
 
 # ---------------------------------------------------------------------------
-# Fast CONUS Equirectangular Reprojection
+# Native HRRR grid validation (replaces the old equirectangular reprojection)
 # ---------------------------------------------------------------------------
-def reproject_hrrr_to_equirectangular(raw_arr, lats_2d, lons_2d, target_shape=(721, 1440), default_val=0.0):
-    global GRID_REMAP_CACHE
-    target_h, target_w = target_shape
-    cache_key = f"{raw_arr.shape}_{target_shape}"
-
-    if cache_key not in GRID_REMAP_CACHE:
-        target_lats = np.linspace(90.0, -90.0, target_h)
-        target_lons = np.linspace(-180.0, 180.0, target_w)
-        
-        lat_min, lat_max = np.min(lats_2d), np.max(lats_2d)
-        lon_min, lon_max = np.min(lons_2d), np.max(lons_2d)
-        
-        y_indices = np.where((target_lats >= lat_min) & (target_lats <= lat_max))[0]
-        x_indices = np.where((target_lons >= lon_min) & (target_lons <= lon_max))[0]
-
-        GRID_REMAP_CACHE[cache_key] = {
-            "y_indices": y_indices,
-            "x_indices": x_indices,
-            "sub_shape": (len(y_indices), len(x_indices))
-        }
-
-    info = GRID_REMAP_CACHE[cache_key]
-    out_grid = np.full(target_shape, default_val, dtype=np.float32)
-    
-    if len(info["y_indices"]) > 0 and len(info["x_indices"]) > 0:
-        conus_resized = cv2.resize(raw_arr.astype(np.float32), (len(info["x_indices"]), len(info["y_indices"])), interpolation=cv2.INTER_LINEAR)
-        y_start, y_end = info["y_indices"][0], info["y_indices"][-1] + 1
-        x_start, x_end = info["x_indices"][0], info["x_indices"][-1] + 1
-        out_grid[y_start:y_end, x_start:x_end] = conus_resized
-
-    return out_grid
+def prepare_native_grid(raw_arr, lats, lons):
+    """Validates the GRIB against the assumed projection and orients it south-up. No resampling."""
+    lons = np.where(lons > 180, lons - 360, lons)
+    if raw_arr.shape != (NY, NX) or lats.shape != (NY, NX):
+        raise ValueError(f"Unexpected HRRR grid shape {raw_arr.shape}, expected {(NY, NX)}")
+    if lats[0, 0] > lats[-1, 0]:  # north-up file: flip to south-up
+        raw_arr, lats, lons = raw_arr[::-1], lats[::-1], lons[::-1]
+    X, Y = _TO_LCC.transform(lons, lats)
+    err = max(
+        np.abs((X - X0) / DX - np.arange(NX)[None, :]).max(),
+        np.abs((Y - Y0) / DX - np.arange(NY)[:, None]).max(),
+    )
+    if err > 0.05:
+        raise ValueError(f"HRRR projection mismatch: {err:.2f} grid cells off")
+    return np.ascontiguousarray(raw_arr), lats, lons
 
 
 # ---------------------------------------------------------------------------
@@ -369,8 +372,6 @@ def process_grib_to_array(grib_path, param_config, want_raster=True, target_date
 
     lats = ds['latitude'].values if 'latitude' in ds.coords else ds['lat'].values
     lons = ds['longitude'].values if 'longitude' in ds.coords else ds['lon'].values
-    if np.nanmax(lons) > 180:
-        lons = np.where(lons > 180, lons - 360, lons)
 
     grib_var = param_config["grib_param"]
     if isinstance(grib_var, list) and len(grib_var) == 2:
@@ -381,23 +382,23 @@ def process_grib_to_array(grib_path, param_config, want_raster=True, target_date
 
     ds.close()
 
-    raw_arr_reproj = reproject_hrrr_to_equirectangular(raw_arr_k, lats, lons)
+    raw_arr, lats, lons = prepare_native_grid(raw_arr_k, lats, lons)
 
     if param_config.get("category_mode"):
-        return np.nan_to_num(raw_arr_reproj, nan=0.0).clip(0, 255).astype(np.uint8), []
+        return np.nan_to_num(raw_arr, nan=0.0).clip(0, 255).astype(np.uint8), []
 
     if param_config.get("unit") == "dam" or str(param_config.get("grib_param", "")).lower() in {"z", "gh", "hgt"}:
-        raw_arr_reproj = raw_arr_reproj / 10.0
+        raw_arr = raw_arr / 10.0
     elif param_config.get("unit") in {"mb", "hPa"} or str(param_config.get("grib_param", "")).lower() in {"msl", "mslma", "prmsl"}:
-        raw_arr_reproj = raw_arr_reproj / 100.0
+        raw_arr = raw_arr / 100.0
 
     contour_levels = extract_contour_levels(
-        raw_arr_reproj,
+        raw_arr, lats, lons,
         param_config.get("contours", []),
         param_config.get("contours_settings")
     )
 
-    arr_8bit = normalize_array(raw_arr_reproj, param_config) if want_raster else None
+    arr_8bit = normalize_array(raw_arr, param_config) if want_raster else None
     return arr_8bit, contour_levels
 
 
@@ -777,6 +778,7 @@ def run_master_pipeline(selected_param_key="2t", custom_run=None, custom_date=No
         "total_frames": len(steps_written),
         "frame_width": frame_w,
         "frame_height": frame_h,
+        "grid": HRRR_GRID_META,
         "temp_min_k": param_config.get("min_val", param_config.get("scaling", {}).get("min_val", 0.0)),
         "temp_max_k": param_config.get("max_val", param_config.get("scaling", {}).get("max_val", 255.0)),
         "chunks": manifest_chunks,
