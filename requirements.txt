@@ -1,0 +1,12 @@
+numpy
+xarray
+pillow
+cfgrib
+contourpy
+rioxarray
+boto3
+opencv-python-headless
+matplotlib
+zstandard
+netCDF4
+huggingface_hub
