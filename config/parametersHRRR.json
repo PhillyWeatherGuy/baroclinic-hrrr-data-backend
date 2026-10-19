@@ -1,0 +1,195 @@
+{
+  "model_meta": {
+    "id": "hrrr",
+    "name": "HRRR",
+    "agency": "NOAA / NCEP",
+    "resolution": "3km",
+    "s3_bucket": "noaa-hrrr-bdp-pds",
+    "grid": {
+      "type": "equirectangular_conus",
+      "frame_width": 1440,
+      "frame_height": 721
+    }
+  },
+  "parameters": {
+    "2t": {
+      "id": "2t",
+      "name": "2m Temperature",
+      "file_type": "sfc",
+      "grib_param": "TMP",
+      "level": "2 m above ground",
+      "idx_search": ":TMP:2 m above ground:",
+      "unit": "°F",
+      "scaling": {
+        "mode": "linear",
+        "min_val": 216.4833,
+        "max_val": 327.5944
+      },
+      "contours": [
+        {
+          "id": "freezing_32f",
+          "target": 273.15,
+          "name": "32°F Freezing Line",
+          "color": "#4169E1",
+          "width": 2.0,
+          "opacity": 0.95
+        }
+      ],
+      "filename_patterns": {
+        "volume": "{model}_{param}_{date}_{run}z_volume_{chunk_idx}.bin",
+        "run_contours": "{model}_{param}_{date}_{run}z_contours.json",
+        "latest_contours": "{model}_{param}_contours.json",
+        "run_manifest": "{model}_{param}_{date}_{run}z_manifest.json",
+        "latest_manifest": "{model}_{param}_manifest.json"
+      }
+    },
+    "prate": {
+      "id": "prate",
+      "name": "Precip Type/Rate (Simulated Radar)",
+      "file_type": "sfc",
+      "grib_param": "PRATE",
+      "level": "surface",
+      "idx_search": ":PRATE:surface:",
+      "unit": "in/hr",
+      "ptype_sources": {
+        "rain": ":CRAIN:surface:",
+        "frzr": ":CFRZR:surface:",
+        "sleet": ":CICEP:surface:",
+        "snow": ":CSNOW:surface:"
+      },
+      "scaling": {
+        "mode": "piecewise",
+        "unit_multiplier": 141.7322834646,
+        "val_points": [0.0, 0.1, 1.0, 2.5],
+        "byte_points": [0, 100, 200, 255]
+      },
+      "contour_sources": [
+        {
+          "id": "mslp",
+          "file_type": "sfc",
+          "grib_param": "MSLMA",
+          "level": "mean sea level",
+          "idx_search": ":MSLMA:mean sea level:",
+          "unit": "mb",
+          "contours_settings": {
+            "blur_kernel": [5, 5],
+            "blur_sigma": 1.2,
+            "coarsen_stride": 2
+          },
+          "contours": [
+            {
+              "id": "mslp_2mb",
+              "name": "MSLP",
+              "color": "#000000",
+              "width": 1.4,
+              "opacity": 0.85,
+              "interval": 2.0,
+              "dynamic": true,
+              "unit": "mb"
+            }
+          ]
+        },
+        {
+          "id": "thickness_1000_500",
+          "file_type": "prs",
+          "grib_param": "HGT",
+          "levels": [500, 1000],
+          "idx_searches": [":HGT:500 mb:", ":HGT:1000 mb:"],
+          "unit": "dam",
+          "contours_settings": {
+            "blur_kernel": [7, 7],
+            "blur_sigma": 1.5,
+            "coarsen_stride": 2
+          },
+          "contours": [
+            {
+              "id": "thickness_6dam",
+              "name": "Thickness",
+              "color": "#000000",
+              "width": 1.4,
+              "opacity": 0.85,
+              "interval": 6.0,
+              "dynamic": true,
+              "unit": "dam"
+            }
+          ]
+        }
+      ],
+      "filename_patterns": {
+        "volume": "{model}_{param}_{date}_{run}z_volume_{chunk_idx}.bin",
+        "run_contours": "{model}_{param}_{date}_{run}z_contours.json",
+        "latest_contours": "{model}_{param}_contours.json",
+        "run_manifest": "{model}_{param}_{date}_{run}z_manifest.json",
+        "latest_manifest": "{model}_{param}_manifest.json"
+      }
+    },
+    "refc": {
+      "id": "refc",
+      "name": "Composite Reflectivity (dBZ)",
+      "file_type": "sfc",
+      "grib_param": "REFC",
+      "level": "entire atmosphere",
+      "idx_search": ":REFC:entire atmosphere:",
+      "unit": "dBZ",
+      "scaling": {
+        "mode": "linear",
+        "min_val": 0.0,
+        "max_val": 75.0
+      },
+      "contours": [],
+      "filename_patterns": {
+        "volume": "{model}_{param}_{date}_{run}z_volume_{chunk_idx}.bin",
+        "run_contours": "{model}_{param}_{date}_{run}z_contours.json",
+        "latest_contours": "{model}_{param}_contours.json",
+        "run_manifest": "{model}_{param}_{date}_{run}z_manifest.json",
+        "latest_manifest": "{model}_{param}_manifest.json"
+      }
+    },
+    "pva": {
+      "id": "pva",
+      "name": "500mb Height & Vort",
+      "file_type": "prs",
+      "grib_param": "ABSV",
+      "level": "500 mb",
+      "idx_search": ":ABSV:500 mb:",
+      "unit": "10^-5 s^-1",
+      "scaling": {
+        "mode": "piecewise",
+        "unit_multiplier": 100000.0,
+        "val_points": [0.0, 3.0, 80.0],
+        "byte_points": [0, 30, 107]
+      },
+      "contour_source": {
+        "file_type": "prs",
+        "grib_param": "HGT",
+        "level": "500 mb",
+        "idx_search": ":HGT:500 mb:",
+        "unit": "dam"
+      },
+      "contours_settings": {
+        "blur_kernel": [3, 3],
+        "blur_sigma": 0.9,
+        "coarsen_stride": 2
+      },
+      "contours": [
+        {
+          "id": "z500_6dam",
+          "name": "500mb Height",
+          "color": "#000000",
+          "width": 1.6,
+          "opacity": 0.9,
+          "interval": 6.0,
+          "dynamic": true,
+          "unit": "dam"
+        }
+      ],
+      "filename_patterns": {
+        "volume": "{model}_{param}_{date}_{run}z_volume_{chunk_idx}.bin",
+        "run_contours": "{model}_z500_{date}_{run}z_contours.json",
+        "latest_contours": "{model}_z500_contours.json",
+        "run_manifest": "{model}_z500_{date}_{run}z_manifest.json",
+        "latest_manifest": "{model}_z500_manifest.json"
+      }
+    }
+  }
+}
