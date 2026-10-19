@@ -870,7 +870,7 @@ if __name__ == "__main__":
 
         print(f"⏱️ Batch {batch_num}/{total_batches} took {time.perf_counter() - t_batch:.1f}s", flush=True)
 
-        print("\n🎉 ALL HRRR PARAMETERS COMPLETED!")
+    print("\n🎉 ALL HRRR PARAMETERS COMPLETED!")
     t_p = time.perf_counter()
     prune_old_huggingface_runs(repo_id=DEFAULT_HF_REPO, days_to_keep=2)
     print(f"⏱️ prune {time.perf_counter() - t_p:.1f}s | pipeline total {time.perf_counter() - t_run:.1f}s", flush=True)
