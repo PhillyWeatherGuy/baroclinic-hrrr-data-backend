@@ -20,6 +20,7 @@ import boto3
 import contourpy
 import gzip
 import struct
+from scipy.spatial import cKDTree
 
 os.environ["GDAL_NUM_THREADS"] = "ALL_CPUS"
 os.environ.setdefault("TQDM_DISABLE", "1")
@@ -288,39 +289,42 @@ def normalize_array(raw_arr, param_config):
 
 
 # ---------------------------------------------------------------------------
-# Fast CONUS Equirectangular Reprojection
+# Fast CONUS Equirectangular Reprojection via KD-Tree
 # ---------------------------------------------------------------------------
-def reproject_hrrr_to_equirectangular(raw_arr, lats_2d, lons_2d, target_shape=(721, 1440), default_val=0.0):
+def reproject_hrrr_to_equirectangular(raw_arr, lats_2d, lons_2d, target_shape=(1600, 2800), default_val=0.0):
     global GRID_REMAP_CACHE
     target_h, target_w = target_shape
     cache_key = f"{raw_arr.shape}_{target_shape}"
 
     if cache_key not in GRID_REMAP_CACHE:
-        target_lats = np.linspace(90.0, -90.0, target_h)
-        target_lons = np.linspace(-180.0, 180.0, target_w)
-        
-        lat_min, lat_max = np.min(lats_2d), np.max(lats_2d)
-        lon_min, lon_max = np.min(lons_2d), np.max(lons_2d)
-        
-        y_indices = np.where((target_lats >= lat_min) & (target_lats <= lat_max))[0]
-        x_indices = np.where((target_lons >= lon_min) & (target_lons <= lon_max))[0]
+        print("  [Init] Building KD-Tree for strict geographic reprojection...")
+        lon_min, lat_min, lon_max, lat_max = -130.0, 22.0, -60.0, 54.0
 
+        target_lats = np.linspace(lat_max, lat_min, target_h)
+        target_lons = np.linspace(lon_min, lon_max, target_w)
+        grid_lon, grid_lat = np.meshgrid(target_lons, target_lats)
+
+        target_points = np.column_stack((grid_lat.ravel(), grid_lon.ravel()))
+        source_points = np.column_stack((lats_2d.ravel(), lons_2d.ravel()))
+
+        tree = cKDTree(source_points)
+        distances, indices = tree.query(target_points, k=1, distance_upper_bound=0.05)
+
+        valid_mask = distances != np.inf
         GRID_REMAP_CACHE[cache_key] = {
-            "y_indices": y_indices,
-            "x_indices": x_indices,
-            "sub_shape": (len(y_indices), len(x_indices))
+            "indices": indices,
+            "valid_mask": valid_mask
         }
 
     info = GRID_REMAP_CACHE[cache_key]
-    out_grid = np.full(target_shape, default_val, dtype=np.float32)
+    out_grid = np.full(target_shape, default_val, dtype=np.float32).ravel()
     
-    if len(info["y_indices"]) > 0 and len(info["x_indices"]) > 0:
-        conus_resized = cv2.resize(raw_arr.astype(np.float32), (len(info["x_indices"]), len(info["y_indices"])), interpolation=cv2.INTER_LINEAR)
-        y_start, y_end = info["y_indices"][0], info["y_indices"][-1] + 1
-        x_start, x_end = info["x_indices"][0], info["x_indices"][-1] + 1
-        out_grid[y_start:y_end, x_start:x_end] = conus_resized
-
-    return out_grid
+    raw_flat = raw_arr.ravel()
+    valid = info["valid_mask"]
+    indices = info["indices"][valid]
+    
+    out_grid[valid] = raw_flat[indices]
+    return out_grid.reshape(target_shape)
 
 
 # ---------------------------------------------------------------------------
@@ -408,14 +412,12 @@ def fetch_and_process_step(target_date, chosen_run, step, param_config, model_na
 
     try:
         with tm("download"):
-            # 🌟 Handle dual-component wind vector parameters (U & V)
             if "idx_search_u" in param_config and "idx_search_v" in param_config:
                 u_file = f"{model_name}_{pid}_u_{step:02d}.grib2"
                 v_file = f"{model_name}_{pid}_v_{step:02d}.grib2"
                 download_hrrr_idx_slice(target_date, chosen_run, step, param_config["idx_search_u"], file_type, u_file)
                 download_hrrr_idx_slice(target_date, chosen_run, step, param_config["idx_search_v"], file_type, v_file)
 
-                # Concatenate U and V into a single GRIB file for cfgrib
                 with open(grib_file, "wb") as f_out:
                     with open(u_file, "rb") as f_u: f_out.write(f_u.read())
                     with open(v_file, "rb") as f_v: f_out.write(f_v.read())
@@ -440,7 +442,6 @@ def fetch_and_process_step(target_date, chosen_run, step, param_config, model_na
             try: os.remove(grib_file)
             except Exception: pass
 
-            # 🌟 Categorical Simulated Radar P-Type (Rain / Snow / Sleet / Freezing Rain)
             ptype_sources = param_config.get("ptype_sources")
             if ptype_sources:
                 ptype_masks = {}
@@ -588,9 +589,6 @@ def prune_old_huggingface_runs(repo_id=DEFAULT_HF_REPO, days_to_keep=2):
 
 
 def check_hrrr_run_ready(target_date, run_hour):
-    """
-    Checks if F18 of the requested HRRR run is available on AWS S3 before running.
-    """
     test_url = f"https://noaa-hrrr-bdp-pds.s3.amazonaws.com/hrrr.{target_date}/conus/hrrr.t{run_hour}z.wrfsfcf18.grib2.idx"
     try:
         req = urllib.request.Request(test_url, method="HEAD", headers={"User-Agent": "BaroClinic-HRRR-Engine"})
@@ -616,7 +614,6 @@ def run_master_pipeline(selected_param_key="2t", custom_run=None, custom_date=No
         CHOSEN_RUN = str(custom_run).zfill(2)
         target_date = str(custom_date)
     else:
-        # 🌟 Check latest hours until finding the run that NOAA has 100% completed (has F18)
         found = False
         for hours_back in range(1, 6):
             t_cand = now_utc - datetime.timedelta(hours=hours_back)
@@ -629,7 +626,6 @@ def run_master_pipeline(selected_param_key="2t", custom_run=None, custom_date=No
                 break
         
         if not found:
-            # Fallback to 2 hours ago
             t_cand = now_utc - datetime.timedelta(hours=2)
             CHOSEN_RUN = t_cand.strftime("%H")
             target_date = t_cand.strftime("%Y%m%d")
