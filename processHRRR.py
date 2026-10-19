@@ -45,7 +45,7 @@ CLIMATOLOGY_CACHE = {}
 GRID_REMAP_CACHE = {}
 
 # ---------------------------------------------------------------------------
-# Timing instrumentation (untouched from ECMWF)
+# Timing instrumentation
 # ---------------------------------------------------------------------------
 TIMINGS = {}
 _T_LOCK = threading.Lock()
@@ -86,9 +86,6 @@ def _print_timing(pid, phases, total):
 
 
 def load_parameter_config(param_key="2t"):
-    """
-    Loads parameter configuration from config/parametersHRRR.json
-    """
     if os.path.exists(CONFIG_FILE_PATH):
         with open(CONFIG_FILE_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -99,7 +96,7 @@ def load_parameter_config(param_key="2t"):
 
 
 # ---------------------------------------------------------------------------
-# Contours: vectorized extraction + CTV2 binary packing (untouched)
+# Contours: vectorized extraction + CTV2 binary packing
 # ---------------------------------------------------------------------------
 
 def _pack_level(cont_gen, level):
@@ -292,7 +289,6 @@ def normalize_array(raw_arr, param_config):
 
 # ---------------------------------------------------------------------------
 # Fast CONUS Equirectangular Reprojection
-# Interpolates the HRRR 3km Lambert grid into standard 1440x721 global canvas
 # ---------------------------------------------------------------------------
 def reproject_hrrr_to_equirectangular(raw_arr, lats_2d, lons_2d, target_shape=(721, 1440), default_val=0.0):
     global GRID_REMAP_CACHE
@@ -300,12 +296,9 @@ def reproject_hrrr_to_equirectangular(raw_arr, lats_2d, lons_2d, target_shape=(7
     cache_key = f"{raw_arr.shape}_{target_shape}"
 
     if cache_key not in GRID_REMAP_CACHE:
-        # Precompute nearest-neighbor remap indices
-        # Target Equirectangular grid: 90N to -90S, -180W to 180E
         target_lats = np.linspace(90.0, -90.0, target_h)
         target_lons = np.linspace(-180.0, 180.0, target_w)
         
-        # CONUS bounding box filter
         lat_min, lat_max = np.min(lats_2d), np.max(lats_2d)
         lon_min, lon_max = np.min(lons_2d), np.max(lons_2d)
         
@@ -322,7 +315,6 @@ def reproject_hrrr_to_equirectangular(raw_arr, lats_2d, lons_2d, target_shape=(7
     out_grid = np.full(target_shape, default_val, dtype=np.float32)
     
     if len(info["y_indices"]) > 0 and len(info["x_indices"]) > 0:
-        # High-speed bilinear resizing onto CONUS geographic bounding window
         conus_resized = cv2.resize(raw_arr.astype(np.float32), (len(info["x_indices"]), len(info["y_indices"])), interpolation=cv2.INTER_LINEAR)
         y_start, y_end = info["y_indices"][0], info["y_indices"][-1] + 1
         x_start, x_end = info["x_indices"][0], info["x_indices"][-1] + 1
@@ -335,9 +327,6 @@ def reproject_hrrr_to_equirectangular(raw_arr, lats_2d, lons_2d, target_shape=(7
 # High-Speed AWS Open Data HTTP Range Downloader
 # ---------------------------------------------------------------------------
 def download_hrrr_idx_slice(target_date, chosen_run, step, search_pattern, file_type, dest_path):
-    """
-    Downloads only the specific GRIB2 message (~1.5 MB) using AWS S3 .idx byte-range headers
-    """
     base_url = f"https://noaa-hrrr-bdp-pds.s3.amazonaws.com/hrrr.{target_date}/conus"
     prefix = f"hrrr.t{chosen_run}z.wrf{file_type}f{step:02d}.grib2"
     grib_url = f"{base_url}/{prefix}"
@@ -378,7 +367,6 @@ def download_hrrr_idx_slice(target_date, chosen_run, step, search_pattern, file_
 def process_grib_to_array(grib_path, param_config, want_raster=True, target_date=None):
     ds = xr.open_dataset(grib_path, engine="cfgrib", backend_kwargs={'errors': 'ignore'})
 
-    # Extract 2D latitudes and longitudes
     lats = ds['latitude'].values if 'latitude' in ds.coords else ds['lat'].values
     lons = ds['longitude'].values if 'longitude' in ds.coords else ds['lon'].values
     if np.nanmax(lons) > 180:
@@ -393,13 +381,11 @@ def process_grib_to_array(grib_path, param_config, want_raster=True, target_date
 
     ds.close()
 
-    # Reproject to 1440x721 Equirectangular matching WebGL shaders
     raw_arr_reproj = reproject_hrrr_to_equirectangular(raw_arr_k, lats, lons)
 
     if param_config.get("category_mode"):
         return np.nan_to_num(raw_arr_reproj, nan=0.0).clip(0, 255).astype(np.uint8), []
 
-    # 🌟 Unit Conversions for Contouring
     if param_config.get("unit") == "dam" or str(param_config.get("grib_param", "")).lower() in {"z", "gh", "hgt"}:
         raw_arr_reproj = raw_arr_reproj / 10.0
     elif param_config.get("unit") in {"mb", "hPa"} or str(param_config.get("grib_param", "")).lower() in {"msl", "mslma", "prmsl"}:
@@ -422,10 +408,23 @@ def fetch_and_process_step(target_date, chosen_run, step, param_config, model_na
 
     try:
         with tm("download"):
-            download_hrrr_idx_slice(
-                target_date, chosen_run, step,
-                param_config["idx_search"], file_type, grib_file
-            )
+            # 🌟 Handle dual-component wind vector parameters (U & V)
+            if "idx_search_u" in param_config and "idx_search_v" in param_config:
+                u_file = f"{model_name}_{pid}_u_{step:02d}.grib2"
+                v_file = f"{model_name}_{pid}_v_{step:02d}.grib2"
+                download_hrrr_idx_slice(target_date, chosen_run, step, param_config["idx_search_u"], file_type, u_file)
+                download_hrrr_idx_slice(target_date, chosen_run, step, param_config["idx_search_v"], file_type, v_file)
+
+                # Concatenate U and V into a single GRIB file for cfgrib
+                with open(grib_file, "wb") as f_out:
+                    with open(u_file, "rb") as f_u: f_out.write(f_u.read())
+                    with open(v_file, "rb") as f_v: f_out.write(f_v.read())
+                
+                try: os.remove(u_file); os.remove(v_file)
+                except Exception: pass
+            else:
+                search_pat = param_config.get("idx_search", f":{param_config['grib_param']}:")
+                download_hrrr_idx_slice(target_date, chosen_run, step, search_pat, file_type, grib_file)
 
         if os.path.exists(grib_file):
             contour_sources = param_config.get("contour_sources")
@@ -458,7 +457,6 @@ def fetch_and_process_step(target_date, chosen_run, step, param_config, model_na
                             try: os.remove(pt_file)
                             except Exception: pass
 
-                # Map onto green channel: 1=Rain, 3=Freezing Rain, 5=Snow, 7=Sleet
                 if ptype_masks:
                     shape = frame_arr.shape
                     ptype_arr = np.zeros(shape, dtype=np.uint8)
@@ -589,6 +587,19 @@ def prune_old_huggingface_runs(repo_id=DEFAULT_HF_REPO, days_to_keep=2):
         print(f"  ⚠️ Could not prune old Hugging Face files: {e}")
 
 
+def check_hrrr_run_ready(target_date, run_hour):
+    """
+    Checks if F18 of the requested HRRR run is available on AWS S3 before running.
+    """
+    test_url = f"https://noaa-hrrr-bdp-pds.s3.amazonaws.com/hrrr.{target_date}/conus/hrrr.t{run_hour}z.wrfsfcf18.grib2.idx"
+    try:
+        req = urllib.request.Request(test_url, method="HEAD", headers={"User-Agent": "BaroClinic-HRRR-Engine"})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
+
+
 def run_master_pipeline(selected_param_key="2t", custom_run=None, custom_date=None):
     MODEL_NAME = "hrrr"
     param_config = load_parameter_config(selected_param_key)
@@ -600,15 +611,28 @@ def run_master_pipeline(selected_param_key="2t", custom_run=None, custom_date=No
     t_total = time.perf_counter()
     phases = {}
 
-    # 🌟 Hourly Run Selection: Defaults to latest completed hour (~1.5 hours delay for AWS sync)
     now_utc = datetime.datetime.now(datetime.timezone.utc)
     if custom_run and custom_date:
         CHOSEN_RUN = str(custom_run).zfill(2)
         target_date = str(custom_date)
     else:
-        target_time = now_utc - datetime.timedelta(hours=1, minutes=30)
-        CHOSEN_RUN = target_time.strftime("%H")
-        target_date = target_time.strftime("%Y%m%d")
+        # 🌟 Check latest hours until finding the run that NOAA has 100% completed (has F18)
+        found = False
+        for hours_back in range(1, 6):
+            t_cand = now_utc - datetime.timedelta(hours=hours_back)
+            cand_run = t_cand.strftime("%H")
+            cand_date = t_cand.strftime("%Y%m%d")
+            if check_hrrr_run_ready(cand_date, cand_run):
+                CHOSEN_RUN = cand_run
+                target_date = cand_date
+                found = True
+                break
+        
+        if not found:
+            # Fallback to 2 hours ago
+            t_cand = now_utc - datetime.timedelta(hours=2)
+            CHOSEN_RUN = t_cand.strftime("%H")
+            target_date = t_cand.strftime("%Y%m%d")
 
     init_time_iso = f"{target_date[:4]}-{target_date[4:6]}-{target_date[6:]}T{CHOSEN_RUN}:00:00Z"
 
