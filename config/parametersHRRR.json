@@ -7,8 +7,8 @@
     "s3_bucket": "noaa-hrrr-bdp-pds",
     "grid": {
       "type": "equirectangular_conus",
-      "frame_width": 1440,
-      "frame_height": 721
+      "frame_width": 2800,
+      "frame_height": 1600
     }
   },
   "parameters": {
