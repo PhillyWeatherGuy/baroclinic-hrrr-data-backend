@@ -261,7 +261,7 @@ def assemble_contour_file(steps):
     parts = [CONTOUR_FORMAT.encode("ascii"), struct.pack("<I", len(steps))]
     for step in sorted(steps):
         entry = steps[step]
-        parts.append(struct.pack("<III", int(step), len(entry["props"]), len(entry["blob"])))
+        parts.append(struct.pack("<III", int(step), len(entry["props"], len(entry["blob"]))))
         parts.append(entry["blob"])
     return b"".join(parts)
 
@@ -288,14 +288,14 @@ def normalize_array(raw_arr, param_config):
 
 
 # ---------------------------------------------------------------------------
-# Fast CONUS Equirectangular Reprojection
+# Fast CONUS Equirectangular Reprojection (True 3km High-Res Canvas)
 # ---------------------------------------------------------------------------
-def reproject_hrrr_to_equirectangular(raw_arr, lats_2d, lons_2d, target_shape=(721, 1440), default_val=0.0):
+def reproject_hrrr_to_equirectangular(raw_arr, lats_2d, lons_2d, target_shape=(1600, 2800), default_val=0.0):
     global GRID_REMAP_CACHE
     target_h, target_w = target_shape
     cache_key = f"{raw_arr.shape}_{target_shape}"
 
-    # 🌟 ONLY NECESSARY CHANGE: Flip array vertically to fix upside-down GRIB orientation
+    # Flip array vertically to fix upside-down GRIB orientation
     if lats_2d is not None and lats_2d.ndim == 2 and lats_2d[0, 0] < lats_2d[-1, 0]:
         raw_arr = np.flipud(raw_arr)
 
