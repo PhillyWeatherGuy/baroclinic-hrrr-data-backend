@@ -10,3 +10,4 @@ matplotlib
 zstandard
 netCDF4
 huggingface_hub
+scipy
