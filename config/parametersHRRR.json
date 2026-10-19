@@ -92,87 +92,6 @@
         "latest_manifest": "{model}_{param}_manifest.json"
       }
     },
-    "prate": {
-      "id": "prate",
-      "name": "Surface Precipitation Rate",
-      "file_type": "sfc",
-      "grib_param": "PRATE",
-      "level": "surface",
-      "idx_search": ":PRATE:surface:",
-      "type": "fc",
-      "unit": "in/hr",
-      "ptype_sources": {
-        "rain": ":CRAIN:surface:",
-        "frzr": ":CFRZR:surface:",
-        "sleet": ":CICEP:surface:",
-        "snow": ":CSNOW:surface:"
-      },
-      "scaling": {
-        "mode": "piecewise",
-        "unit_multiplier": 141.7322834646,
-        "val_points": [0.0, 0.1, 1.0, 2.5],
-        "byte_points": [0, 100, 200, 255]
-      },
-      "contour_sources": [
-        {
-          "id": "mslp",
-          "file_type": "sfc",
-          "grib_param": "MSLMA",
-          "level": "mean sea level",
-          "idx_search": ":MSLMA:mean sea level:",
-          "unit": "mb",
-          "contours_settings": {
-            "blur_kernel": [5, 5],
-            "blur_sigma": 1.2,
-            "coarsen_stride": 2
-          },
-          "contours": [
-            {
-              "id": "mslp_2mb",
-              "name": "MSLP",
-              "color": "#000000",
-              "width": 1.4,
-              "opacity": 0.85,
-              "interval": 2.0,
-              "dynamic": true,
-              "unit": "mb"
-            }
-          ]
-        },
-        {
-          "id": "thickness_1000_500",
-          "file_type": "prs",
-          "grib_param": "HGT",
-          "levels": [500, 1000],
-          "idx_searches": [":HGT:500 mb:", ":HGT:1000 mb:"],
-          "unit": "dam",
-          "contours_settings": {
-            "blur_kernel": [7, 7],
-            "blur_sigma": 1.5,
-            "coarsen_stride": 2
-          },
-          "contours": [
-            {
-              "id": "thickness_6dam",
-              "name": "Thickness",
-              "color": "#000000",
-              "width": 1.4,
-              "opacity": 0.85,
-              "interval": 6.0,
-              "dynamic": true,
-              "unit": "dam"
-            }
-          ]
-        }
-      ],
-      "filename_patterns": {
-        "volume": "{model}_{param}_{date}_{run}z_volume_{chunk_idx}.bin",
-        "run_contours": "{model}_{param}_{date}_{run}z_contours.json",
-        "latest_contours": "{model}_{param}_contours.json",
-        "run_manifest": "{model}_{param}_{date}_{run}z_manifest.json",
-        "latest_manifest": "{model}_{param}_manifest.json"
-      }
-    },
     "refc": {
       "id": "refc",
       "name": "Composite Reflectivity",
@@ -182,6 +101,12 @@
       "idx_search": ":REFC:entire atmosphere:",
       "type": "fc",
       "unit": "dBZ",
+      "ptype_sources": {
+        "rain": ":CRAIN:surface:",
+        "frzr": ":CFRZR:surface:",
+        "sleet": ":CICEP:surface:",
+        "snow": ":CSNOW:surface:"
+      },
       "scaling": {
         "mode": "linear",
         "min_val": 0.0,
