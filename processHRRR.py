@@ -42,6 +42,14 @@ CONTOUR_COORD_SCALE = 1000
 CONTOUR_FORMAT = "CTV2"
 INT16_MAX = 32767
 
+CLIMATOLOGY_NAME = "hgt.mon.ltm.1991-2020.nc"  # NCEP/NCAR R1 long-term monthly means (12 months, 17 levels)
+_HERE = os.path.dirname(os.path.abspath(__file__))
+CLIMATOLOGY_CANDIDATES = [
+    os.path.join(_HERE, CLIMATOLOGY_NAME),
+    os.path.join(_HERE, "climatology", CLIMATOLOGY_NAME),
+    CLIMATOLOGY_NAME,
+    os.path.join("climatology", CLIMATOLOGY_NAME),
+]
 CLIMATOLOGY_CACHE = {}
 
 # ---------------------------------------------------------------------------
@@ -366,6 +374,46 @@ def download_hrrr_idx_slice(target_date, chosen_run, step, search_pattern, file_
     return dest_path
 
 
+def _bilinear_latlon(field, la, lo, lat, lon):
+    """Bilinear sample of a regular lat/lon field (lon 0-360, wraps) at arbitrary lat/lon arrays."""
+    if la[0] > la[-1]:
+        la, field = la[::-1], field[::-1]
+    field = np.concatenate([field, field[:, :1]], axis=1)
+    lo = np.append(lo, lo[0] + 360.0)
+    lon = np.mod(lon, 360.0)
+    fi = np.interp(lat, la, np.arange(len(la)))
+    fj = np.interp(lon, lo, np.arange(len(lo)))
+    i0 = np.clip(np.floor(fi).astype(int), 0, len(la) - 2)
+    j0 = np.clip(np.floor(fj).astype(int), 0, len(lo) - 2)
+    di, dj = fi - i0, fj - j0
+    return (field[i0, j0] * (1 - di) * (1 - dj) + field[i0 + 1, j0] * di * (1 - dj)
+            + field[i0, j0 + 1] * (1 - di) * dj + field[i0 + 1, j0 + 1] * di * dj)
+
+
+def _find_climatology_file():
+    for path in CLIMATOLOGY_CANDIDATES:
+        if os.path.exists(path):
+            return path
+    raise FileNotFoundError(f"Climatology file {CLIMATOLOGY_NAME} not found. Looked in: {CLIMATOLOGY_CANDIDATES}")
+
+
+def climatology_on_native_grid(level_hpa, month, lats, lons):
+    """Long-term-mean height (m) for the given calendar month (1-12) at every native HRRR cell.
+    Cached per (level, month), so each forecast step uses the baseline of its own valid month."""
+    key = (int(level_hpa), int(month))
+    if key not in CLIMATOLOGY_CACHE:
+        with xr.open_dataset(_find_climatology_file(), decode_times=False) as ds:
+            n_time = ds["hgt"].sizes["time"]
+            if n_time != 12:
+                raise ValueError(f"Climatology has {n_time} time steps, expected 12 monthly means")
+            # The 12 stamps are month starts in ascending order (Jan..Dec); rank them rather than trusting file order.
+            t_idx = int(np.argsort(ds["time"].values)[int(month) - 1])
+            field = ds["hgt"].sel(level=float(level_hpa)).isel(time=t_idx).values.astype(np.float64)
+            la, lo = ds["lat"].values.astype(np.float64), ds["lon"].values.astype(np.float64)
+        CLIMATOLOGY_CACHE[key] = _bilinear_latlon(field, la, lo, lats, lons).astype(np.float32)
+    return CLIMATOLOGY_CACHE[key]
+
+
 def read_native_field(grib_path, grib_var):
     """Reads one GRIB message (or a U/V pair -> speed) as a validated, south-up native-grid array."""
     ds = xr.open_dataset(grib_path, engine="cfgrib", backend_kwargs={'errors': 'ignore'})
@@ -392,13 +440,17 @@ def convert_units(raw_arr, cfg):
 
 
 @timed("decode_all")
-def process_grib_to_array(grib_path, param_config, want_raster=True, target_date=None):
+def process_grib_to_array(grib_path, param_config, want_raster=True, target_date=None, valid_time=None):
     raw_arr, lats, lons = read_native_field(grib_path, param_config["grib_param"])
 
     if param_config.get("category_mode"):
         return np.nan_to_num(raw_arr, nan=0.0).clip(0, 255).astype(np.uint8), []
 
-    raw_arr = convert_units(raw_arr, param_config)
+    if param_config.get("climatology_level") is not None:
+        # Anomaly vs. the long-term mean of the valid time's calendar month (HGT is gpm ~ m, no unit conversion)
+        raw_arr = raw_arr - climatology_on_native_grid(param_config["climatology_level"], valid_time.month, lats, lons)
+    else:
+        raw_arr = convert_units(raw_arr, param_config)
 
     contour_levels = extract_contour_levels(
         raw_arr, lats, lons,
@@ -470,7 +522,8 @@ def fetch_and_process_step(target_date, chosen_run, step, param_config, model_na
 
             has_contours = bool(contour_sources)
             raster_config = {**param_config, "contours": []} if has_contours else param_config
-            frame_arr, contour_levels = process_grib_to_array(grib_file, raster_config, target_date=target_date)
+            valid_time = datetime.datetime.strptime(f"{target_date}{chosen_run}", "%Y%m%d%H") + datetime.timedelta(hours=step)
+            frame_arr, contour_levels = process_grib_to_array(grib_file, raster_config, target_date=target_date, valid_time=valid_time)
             contour_levels = list(contour_levels)
             ptype_arr = None
 
