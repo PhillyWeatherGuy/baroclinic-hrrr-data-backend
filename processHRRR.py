@@ -366,14 +366,13 @@ def download_hrrr_idx_slice(target_date, chosen_run, step, search_pattern, file_
     return dest_path
 
 
-@timed("decode_all")
-def process_grib_to_array(grib_path, param_config, want_raster=True, target_date=None):
+def read_native_field(grib_path, grib_var):
+    """Reads one GRIB message (or a U/V pair -> speed) as a validated, south-up native-grid array."""
     ds = xr.open_dataset(grib_path, engine="cfgrib", backend_kwargs={'errors': 'ignore'})
 
     lats = ds['latitude'].values if 'latitude' in ds.coords else ds['lat'].values
     lons = ds['longitude'].values if 'longitude' in ds.coords else ds['lon'].values
 
-    grib_var = param_config["grib_param"]
     if isinstance(grib_var, list) and len(grib_var) == 2:
         raw_arr_k = np.hypot(np.squeeze(ds[grib_var[0]].values), np.squeeze(ds[grib_var[1]].values))
     else:
@@ -381,16 +380,25 @@ def process_grib_to_array(grib_path, param_config, want_raster=True, target_date
         raw_arr_k = np.squeeze(ds[target_var].values)
 
     ds.close()
+    return prepare_native_grid(raw_arr_k, lats, lons)
 
-    raw_arr, lats, lons = prepare_native_grid(raw_arr_k, lats, lons)
+
+def convert_units(raw_arr, cfg):
+    if cfg.get("unit") == "dam" or str(cfg.get("grib_param", "")).lower() in {"z", "gh", "hgt"}:
+        return raw_arr / 10.0
+    if cfg.get("unit") in {"mb", "hPa"} or str(cfg.get("grib_param", "")).lower() in {"msl", "mslma", "prmsl"}:
+        return raw_arr / 100.0
+    return raw_arr
+
+
+@timed("decode_all")
+def process_grib_to_array(grib_path, param_config, want_raster=True, target_date=None):
+    raw_arr, lats, lons = read_native_field(grib_path, param_config["grib_param"])
 
     if param_config.get("category_mode"):
         return np.nan_to_num(raw_arr, nan=0.0).clip(0, 255).astype(np.uint8), []
 
-    if param_config.get("unit") == "dam" or str(param_config.get("grib_param", "")).lower() in {"z", "gh", "hgt"}:
-        raw_arr = raw_arr / 10.0
-    elif param_config.get("unit") in {"mb", "hPa"} or str(param_config.get("grib_param", "")).lower() in {"msl", "mslma", "prmsl"}:
-        raw_arr = raw_arr / 100.0
+    raw_arr = convert_units(raw_arr, param_config)
 
     contour_levels = extract_contour_levels(
         raw_arr, lats, lons,
@@ -400,6 +408,34 @@ def process_grib_to_array(grib_path, param_config, want_raster=True, target_date
 
     arr_8bit = normalize_array(raw_arr, param_config) if want_raster else None
     return arr_8bit, contour_levels
+
+
+def extract_source_contours(src, param_config, target_date, chosen_run, step, model_name):
+    """Downloads a contour source's GRIB(s) and returns its contour levels. Two searches = difference (thickness)."""
+    file_type = src.get("file_type", "sfc")
+    searches = src.get("idx_searches") or [src["idx_search"]]
+    tag = src.get("id", "c")
+    fields, lats, lons = [], None, None
+
+    for k, pat in enumerate(searches):
+        path = f"{model_name}_{param_config['id']}_c_{tag}_{k}_{step:02d}.grib2"
+        try:
+            download_hrrr_idx_slice(target_date, chosen_run, step, pat, file_type, path)
+            raw, lats, lons = read_native_field(path, src["grib_param"])
+            fields.append(raw)
+        finally:
+            if os.path.exists(path):
+                try: os.remove(path)
+                except Exception: pass
+
+    raw_arr = fields[0] - fields[1] if len(fields) == 2 else fields[0]  # thickness = upper - lower
+    raw_arr = convert_units(raw_arr, src)
+
+    return extract_contour_levels(
+        raw_arr, lats, lons,
+        src.get("contours") or param_config.get("contours", []),
+        src.get("contours_settings") or param_config.get("contours_settings"),
+    )
 
 
 def fetch_and_process_step(target_date, chosen_run, step, param_config, model_name):
@@ -440,6 +476,12 @@ def fetch_and_process_step(target_date, chosen_run, step, param_config, model_na
 
             try: os.remove(grib_file)
             except Exception: pass
+
+            for src in (contour_sources or []):
+                try:
+                    contour_levels.extend(extract_source_contours(src, param_config, target_date, chosen_run, step, model_name))
+                except Exception as e:
+                    print(f"  ⚠️ [{pid}] Contours '{src.get('id', src.get('grib_param'))}' failed F{step:02d}: {e}")
 
             # 🌟 Categorical Simulated Radar P-Type (Rain / Snow / Sleet / Freezing Rain)
             ptype_sources = param_config.get("ptype_sources")
