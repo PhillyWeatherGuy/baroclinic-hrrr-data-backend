@@ -26,8 +26,14 @@ os.environ["GDAL_NUM_THREADS"] = "ALL_CPUS"
 os.environ.setdefault("TQDM_DISABLE", "1")
 sys.stdout.reconfigure(line_buffering=True)
 
-# HRRR standard forecast hours: Hourly from F00 to F18
-FORECAST_STEPS = list(range(0, 19))
+# HRRR forecast hours: the 00/06/12/18z cycles run hourly out to F48; every other cycle stops at F18.
+EXTENDED_RUNS = {"00", "06", "12", "18"}
+PREFER_EXTENDED_RUNS = True   # auto mode: use the newest finished 48h run (up to EXTENDED_LOOKBACK_HOURS old) over a newer 18h run
+EXTENDED_LOOKBACK_HOURS = 9
+
+
+def forecast_steps_for_run(run_hour):
+    return list(range(0, 49)) if str(run_hour).zfill(2) in EXTENDED_RUNS else list(range(0, 19))
 
 MAX_TEXTURE_SIZE = 4096
 MAX_CONCURRENT_WORKERS = int(os.environ.get("MAX_WORKERS", "12"))
@@ -685,15 +691,30 @@ def prune_old_huggingface_runs(repo_id=DEFAULT_HF_REPO, days_to_keep=2):
 
 def check_hrrr_run_ready(target_date, run_hour):
     """
-    Checks if F18 of the requested HRRR run is available on AWS S3 before running.
+    Checks if the LAST forecast hour of the requested HRRR run (F48 for 00/06/12/18z, else F18)
+    is available on AWS S3 before running.
     """
-    test_url = f"https://noaa-hrrr-bdp-pds.s3.amazonaws.com/hrrr.{target_date}/conus/hrrr.t{run_hour}z.wrfsfcf18.grib2.idx"
+    last_step = forecast_steps_for_run(run_hour)[-1]
+    test_url = f"https://noaa-hrrr-bdp-pds.s3.amazonaws.com/hrrr.{target_date}/conus/hrrr.t{run_hour}z.wrfsfcf{last_step:02d}.grib2.idx"
     try:
         req = urllib.request.Request(test_url, method="HEAD", headers={"User-Agent": "BaroClinic-HRRR-Engine"})
         with urllib.request.urlopen(req, timeout=8) as resp:
             return resp.status == 200
     except Exception:
         return False
+
+
+def find_latest_ready_run(now_utc, max_hours_back, extended_only=False):
+    """Newest (date, run) whose final forecast hour is on S3, or None."""
+    for hours_back in range(1, max_hours_back + 1):
+        t_cand = now_utc - datetime.timedelta(hours=hours_back)
+        cand_run = t_cand.strftime("%H")
+        if extended_only and cand_run not in EXTENDED_RUNS:
+            continue
+        cand_date = t_cand.strftime("%Y%m%d")
+        if check_hrrr_run_ready(cand_date, cand_run):
+            return cand_date, cand_run
+    return None
 
 
 def run_master_pipeline(selected_param_key="2t", custom_run=None, custom_date=None):
@@ -712,23 +733,22 @@ def run_master_pipeline(selected_param_key="2t", custom_run=None, custom_date=No
         CHOSEN_RUN = str(custom_run).zfill(2)
         target_date = str(custom_date)
     else:
-        # 🌟 Check latest hours until finding the run that NOAA has 100% completed (has F18)
-        found = False
-        for hours_back in range(1, 6):
-            t_cand = now_utc - datetime.timedelta(hours=hours_back)
-            cand_run = t_cand.strftime("%H")
-            cand_date = t_cand.strftime("%Y%m%d")
-            if check_hrrr_run_ready(cand_date, cand_run):
-                CHOSEN_RUN = cand_run
-                target_date = cand_date
-                found = True
-                break
-        
-        if not found:
+        # 🌟 Newest run NOAA has 100% completed (F48 for 00/06/12/18z, F18 otherwise)
+        pick = None
+        if PREFER_EXTENDED_RUNS:
+            pick = find_latest_ready_run(now_utc, EXTENDED_LOOKBACK_HOURS, extended_only=True)
+        if pick is None:
+            pick = find_latest_ready_run(now_utc, 5)
+
+        if pick is not None:
+            target_date, CHOSEN_RUN = pick
+        else:
             # Fallback to 2 hours ago
             t_cand = now_utc - datetime.timedelta(hours=2)
             CHOSEN_RUN = t_cand.strftime("%H")
             target_date = t_cand.strftime("%Y%m%d")
+
+    FORECAST_STEPS = forecast_steps_for_run(CHOSEN_RUN)
 
     init_time_iso = f"{target_date[:4]}-{target_date[4:6]}-{target_date[6:]}T{CHOSEN_RUN}:00:00Z"
 
