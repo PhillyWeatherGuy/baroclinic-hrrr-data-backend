@@ -199,6 +199,7 @@
       "grib_param": "HGT",
       "level": "500 mb",
       "idx_search": ":HGT:500 mb:",
+      "climatology_level": 500,
       "type": "fc",
       "unit": "m",
       "scaling": {
