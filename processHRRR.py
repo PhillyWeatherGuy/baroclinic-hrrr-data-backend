@@ -38,7 +38,7 @@ POLL_SECONDS = 20           # how often to look for the next forecast hour on S3
 STALL_TIMEOUT_MINUTES = 45  # give up if no new forecast hour appears for this long
 MAX_STEPS_PER_BATCH = 6     # forecast hours processed + uploaded together (catch-up uses several, live usually 1)
 MAX_STEP_ATTEMPTS = 3       # tries per (parameter, forecast hour) before skipping it
-LATEST_MIN_FRAMES = 6       # the "latest" manifest/contours only switch to a new run once it has this many hours
+LATEST_MIN_FRAMES = 1       # the "latest" manifest/contours only switch to a new run once it has this many hours
 STAGE_DIR = "run_hrrr_stage"
 
 
