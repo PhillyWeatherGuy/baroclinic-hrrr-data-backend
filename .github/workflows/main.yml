@@ -1,13 +1,26 @@
 name: Generate HRRR Weather Maps
 
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('HRRR {0} {1}z', inputs.date, inputs.run) || 'HRRR build' }}
+
 on:
   push:
     branches:
       - main
-  schedule:
-    # Runs hourly at minute 45 (allowing NOAA to finish pushing the run to S3)
-    - cron: '45 * * * *'
   workflow_dispatch:
+    inputs:
+      date:
+        description: 'Run date, YYYYMMDD (leave blank for the latest run)'
+        required: false
+        type: string
+      run:
+        description: 'Run hour, 00-23 (leave blank for the latest run)'
+        required: false
+        type: string
+
+# Only one pipeline at a time, so runs never upload over each other
+concurrency:
+  group: hrrr-pipeline
+  cancel-in-progress: false
 
 jobs:
   build-and-plot:
@@ -31,7 +44,7 @@ jobs:
     - name: Install Python Dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install numpy xarray pillow cfgrib contourpy rioxarray boto3 opencv-python-headless matplotlib zstandard netCDF4 huggingface_hub
+        pip install numpy xarray pillow cfgrib contourpy rioxarray boto3 opencv-python-headless matplotlib zstandard netCDF4 huggingface_hub pyproj
 
     - name: Run Weather Data Texture Pipeline & Upload
       env:
@@ -39,5 +52,11 @@ jobs:
         B2_APPLICATION_KEY: ${{ secrets.B2_APPLICATION_KEY }}
         B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        RUN_DATE: ${{ inputs.date }}
+        RUN_HOUR: ${{ inputs.run }}
       run: |
-        python processHRRR.py
+        if [ -n "$RUN_DATE" ] && [ -n "$RUN_HOUR" ]; then
+          python processHRRR.py --date "$RUN_DATE" --run "$RUN_HOUR"
+        else
+          python processHRRR.py
+        fi
