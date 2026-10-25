@@ -28,8 +28,18 @@ sys.stdout.reconfigure(line_buffering=True)
 
 # HRRR forecast hours: the 00/06/12/18z cycles run hourly out to F48; every other cycle stops at F18.
 EXTENDED_RUNS = {"00", "06", "12", "18"}
-PREFER_EXTENDED_RUNS = True   # auto mode: use the newest finished 48h run (up to EXTENDED_LOOKBACK_HOURS old) over a newer 18h run
-EXTENDED_LOOKBACK_HOURS = 9
+PREFER_EXTENDED_RUNS = True   # auto mode: use the newest started 48h run (up to EXTENDED_LOOKBACK_HOURS old) over a newer 18h run
+EXTENDED_LOOKBACK_HOURS = 7
+NORMAL_LOOKBACK_HOURS = 3
+MODEL_NAME = "hrrr"
+
+# Live-mode settings
+POLL_SECONDS = 20           # how often to look for the next forecast hour on S3
+STALL_TIMEOUT_MINUTES = 45  # give up if no new forecast hour appears for this long
+MAX_STEPS_PER_BATCH = 6     # forecast hours processed + uploaded together (catch-up uses several, live usually 1)
+MAX_STEP_ATTEMPTS = 3       # tries per (parameter, forecast hour) before skipping it
+LATEST_MIN_FRAMES = 1       # the "latest" manifest/contours only switch to a new run once it has this many hours
+STAGE_DIR = "run_hrrr_stage"
 
 
 def forecast_steps_for_run(run_hour):
@@ -626,12 +636,12 @@ def build_volume_chunks(frame_arrays, steps_written, model_name, param_config, t
 
 
 def upload_to_huggingface(folder_path, repo_id=DEFAULT_HF_REPO):
+    """Uploads the folder as one commit. Returns True on success."""
     hf_token = os.environ.get("HF_TOKEN")
     if not hf_token:
         print("⚠️ HF_TOKEN not set in environment. Skipping Hugging Face upload.")
-        return
+        return False
 
-    print(f"\n🤗 Uploading {folder_path} assets to Hugging Face ({repo_id})...")
     try:
         from huggingface_hub import HfApi
         api = HfApi(token=hf_token)
@@ -639,11 +649,13 @@ def upload_to_huggingface(folder_path, repo_id=DEFAULT_HF_REPO):
             folder_path=folder_path,
             repo_id=repo_id,
             repo_type="dataset",
-            commit_message=f"Upload HRRR grids: {folder_path}"
+            commit_message=f"HRRR update: {time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime())}Z"
         )
-        print(f"  ✅ Uploaded to Hugging Face: {folder_path}")
+        print(f"  ✅ Uploaded to Hugging Face", flush=True)
+        return True
     except Exception as e:
-        print(f"  ❌ Failed to upload to Hugging Face: {e}")
+        print(f"  ❌ Failed to upload to Hugging Face: {e}", flush=True)
+        return False
 
 
 def prune_old_huggingface_runs(repo_id=DEFAULT_HF_REPO, days_to_keep=2):
@@ -689,247 +701,283 @@ def prune_old_huggingface_runs(repo_id=DEFAULT_HF_REPO, days_to_keep=2):
         print(f"  ⚠️ Could not prune old Hugging Face files: {e}")
 
 
-def check_hrrr_run_ready(target_date, run_hour):
-    """
-    Checks if the LAST forecast hour of the requested HRRR run (F48 for 00/06/12/18z, else F18)
-    is available on AWS S3 before running.
-    """
-    last_step = forecast_steps_for_run(run_hour)[-1]
-    test_url = f"https://noaa-hrrr-bdp-pds.s3.amazonaws.com/hrrr.{target_date}/conus/hrrr.t{run_hour}z.wrfsfcf{last_step:02d}.grib2.idx"
-    try:
-        req = urllib.request.Request(test_url, method="HEAD", headers={"User-Agent": "BaroClinic-HRRR-Engine"})
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            return resp.status == 200
-    except Exception:
-        return False
+def hrrr_step_ready(target_date, run_hour, step):
+    """True once BOTH the surface and pressure-level files of this forecast hour are on S3.
+    NOAA writes the .idx after the GRIB, so a 200 on the .idx means the file is complete."""
+    base = f"https://noaa-hrrr-bdp-pds.s3.amazonaws.com/hrrr.{target_date}/conus/hrrr.t{run_hour}z.wrf"
+    for file_type in ("sfc", "prs"):
+        url = f"{base}{file_type}f{step:02d}.grib2.idx"
+        try:
+            req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "BaroClinic-HRRR-Engine"})
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                if resp.status != 200:
+                    return False
+        except Exception:
+            return False
+    return True
 
 
-def find_latest_ready_run(now_utc, max_hours_back, extended_only=False):
-    """Newest (date, run) whose final forecast hour is on S3, or None."""
-    for hours_back in range(1, max_hours_back + 1):
+def find_latest_started_run(now_utc, max_hours_back, extended_only=False):
+    """Newest (date, run) whose first forecast hour (F00) is on S3, or None."""
+    for hours_back in range(0, max_hours_back + 1):
         t_cand = now_utc - datetime.timedelta(hours=hours_back)
         cand_run = t_cand.strftime("%H")
         if extended_only and cand_run not in EXTENDED_RUNS:
             continue
         cand_date = t_cand.strftime("%Y%m%d")
-        if check_hrrr_run_ready(cand_date, cand_run):
+        if hrrr_step_ready(cand_date, cand_run, 0):
             return cand_date, cand_run
     return None
 
 
-def run_master_pipeline(selected_param_key="2t", custom_run=None, custom_date=None):
-    MODEL_NAME = "hrrr"
-    param_config = load_parameter_config(selected_param_key)
-    patterns = param_config["filename_patterns"]
-
-    output_dist_dir = f"run_{MODEL_NAME}_{param_config['id']}"
-
-    TIMINGS.clear()
-    t_total = time.perf_counter()
-    phases = {}
-
-    now_utc = datetime.datetime.now(datetime.timezone.utc)
+def choose_run(custom_run, custom_date):
     if custom_run and custom_date:
-        CHOSEN_RUN = str(custom_run).zfill(2)
-        target_date = str(custom_date)
-    else:
-        # 🌟 Newest run NOAA has 100% completed (F48 for 00/06/12/18z, F18 otherwise)
-        pick = None
-        if PREFER_EXTENDED_RUNS:
-            pick = find_latest_ready_run(now_utc, EXTENDED_LOOKBACK_HOURS, extended_only=True)
-        if pick is None:
-            pick = find_latest_ready_run(now_utc, 5)
+        return str(custom_date), str(custom_run).zfill(2)
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    pick = None
+    if PREFER_EXTENDED_RUNS:
+        pick = find_latest_started_run(now_utc, EXTENDED_LOOKBACK_HOURS, extended_only=True)
+    if pick is None:
+        pick = find_latest_started_run(now_utc, NORMAL_LOOKBACK_HOURS)
+    if pick is None:
+        t_cand = now_utc - datetime.timedelta(hours=2)
+        pick = (t_cand.strftime("%Y%m%d"), t_cand.strftime("%H"))
+    return pick
 
-        if pick is not None:
-            target_date, CHOSEN_RUN = pick
-        else:
-            # Fallback to 2 hours ago
-            t_cand = now_utc - datetime.timedelta(hours=2)
-            CHOSEN_RUN = t_cand.strftime("%H")
-            target_date = t_cand.strftime("%Y%m%d")
 
-    FORECAST_STEPS = forecast_steps_for_run(CHOSEN_RUN)
+def new_param_state():
+    return {
+        "results": {},      # step -> uint8 frame
+        "contours": {},     # step -> packed contour levels
+        "ptype": {},        # step -> uint8 p-type frame
+        "attempts": {},     # step -> failed attempts so far
+        "published": {},    # chunk filename -> tuple of forecast steps already uploaded in that file
+        "staged": {},       # same, for files written but not yet uploaded
+        "dirty": False,     # new frames since the last write
+    }
 
-    init_time_iso = f"{target_date[:4]}-{target_date[4:6]}-{target_date[6:]}T{CHOSEN_RUN}:00:00Z"
 
-    print(f"🌍 [{param_config['id']}] Model: {MODEL_NAME.upper()} | Param: {param_config['name']} | Run: {CHOSEN_RUN}z on {target_date}")
-
-    for f in glob.glob(f"{MODEL_NAME}_{param_config['id']}_*.grib2"):
-        try: os.remove(f)
-        except Exception: pass
-
-    os.makedirs(output_dist_dir, exist_ok=True)
-
-    t0 = time.perf_counter()
-    results = {}
-    contour_steps = {}
-    ptype_results = {}
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_CONCURRENT_WORKERS) as executor:
-        future_to_step = {
-            executor.submit(fetch_and_process_step, target_date, CHOSEN_RUN, step, param_config, MODEL_NAME): step
-            for step in FORECAST_STEPS
-        }
-        for future in concurrent.futures.as_completed(future_to_step):
-            step, arr, packed, ptype_arr = future.result()
-            if arr is not None:
-                results[step] = arr
-                if packed and packed["props"]:
-                    contour_steps[step] = packed
-                if ptype_arr is not None:
-                    ptype_results[step] = ptype_arr
-
-    phases["fetch_phase"] = time.perf_counter() - t0
-    print(f"[{param_config['id']}] steps ok: {len(results)}/{len(FORECAST_STEPS)}", flush=True)
-
-    sorted_steps = sorted(results.keys())
-    frame_arrays = [results[s] for s in sorted_steps]
-    ptype_arrays = [ptype_results.get(s) for s in sorted_steps]
-    steps_written = sorted_steps
-
-    if not frame_arrays:
-        print(f"❌ [{param_config['id']}] No frames processed. Exiting pipeline.")
+def write_param_outputs(state, param_config, stage_dir, target_date, chosen_run, init_time_iso, expected_frames, final):
+    """Writes this parameter's current files into stage_dir. Only chunk files whose contents changed are written."""
+    patterns = param_config["filename_patterns"]
+    pid = param_config["id"]
+    sorted_steps = sorted(state["results"])
+    if not sorted_steps:
         return
+    frame_arrays = [state["results"][s] for s in sorted_steps]
+    ptype_arrays = [state["ptype"].get(s) for s in sorted_steps]
+    publish_latest = final or len(sorted_steps) >= LATEST_MIN_FRAMES
 
-    t0 = time.perf_counter()
+    # --- contours (one file per run holding every step so far) ---
+    contour_steps = state["contours"]
     if contour_steps and "run_contours" in patterns:
-        contour_binary = assemble_contour_file(contour_steps)
-        compressed_contours = gzip.compress(contour_binary, compresslevel=6)
-
+        compressed_contours = gzip.compress(assemble_contour_file(contour_steps), compresslevel=6)
         if len(compressed_contours) >= 100:
             master_contours = {
-                "model": MODEL_NAME,
-                "parameter": param_config["id"],
-                "run": f"{CHOSEN_RUN}z",
-                "date": target_date,
+                "model": MODEL_NAME, "parameter": pid, "run": f"{chosen_run}z", "date": target_date,
                 "steps": {
                     str(step): {
                         "type": "FeatureCollection",
                         "features": [
-                            {
-                                "type": "Feature",
-                                "geometry": {"type": "MultiLineString", "coordinates": []},
-                                "properties": props,
-                            }
+                            {"type": "Feature",
+                             "geometry": {"type": "MultiLineString", "coordinates": []},
+                             "properties": props}
                             for props in contour_steps[step]["props"]
                         ],
                     }
                     for step in sorted(contour_steps)
                 },
             }
-
             run_contour_filename = patterns["run_contours"].format(
-                model=MODEL_NAME, param=param_config["id"], date=target_date, run=CHOSEN_RUN.lower()
-            )
+                model=MODEL_NAME, param=pid, date=target_date, run=chosen_run.lower())
             run_binary_filename = run_contour_filename.replace(".json", ".bin.gz")
-            master_contours["binary"] = {
-                "format": CONTOUR_FORMAT,
-                "scale": CONTOUR_COORD_SCALE,
-                "file": run_binary_filename,
-            }
+            master_contours["binary"] = {"format": CONTOUR_FORMAT, "scale": CONTOUR_COORD_SCALE, "file": run_binary_filename}
 
-            with open(os.path.join(output_dist_dir, run_contour_filename), 'w') as f:
+            with open(os.path.join(stage_dir, run_contour_filename), "w") as f:
                 json.dump(master_contours, f, separators=(",", ":"))
-            with open(os.path.join(output_dist_dir, run_binary_filename), "wb") as f:
+            with open(os.path.join(stage_dir, run_binary_filename), "wb") as f:
                 f.write(compressed_contours)
-
-            if "latest_contours" in patterns:
-                latest_contour_filename = patterns["latest_contours"].format(
-                    model=MODEL_NAME, param=param_config["id"]
-                )
-                with open(os.path.join(output_dist_dir, latest_contour_filename), 'w') as f:
+            if publish_latest and "latest_contours" in patterns:
+                latest_contour_filename = patterns["latest_contours"].format(model=MODEL_NAME, param=pid)
+                with open(os.path.join(stage_dir, latest_contour_filename), "w") as f:
                     json.dump(master_contours, f, separators=(",", ":"))
-    phases["contour_file"] = time.perf_counter() - t0
 
-    t0 = time.perf_counter()
+    # --- volume chunks (10 frames each); only new/changed chunks are written ---
     chunks, frame_w, frame_h = build_volume_chunks(
-        frame_arrays,
-        steps_written,
-        model_name=MODEL_NAME,
-        param_config=param_config,
-        target_date=target_date,
-        chosen_run=CHOSEN_RUN,
-        ptype_arrays=ptype_arrays if ptype_results else None
+        frame_arrays, sorted_steps, model_name=MODEL_NAME, param_config=param_config,
+        target_date=target_date, chosen_run=chosen_run,
+        ptype_arrays=ptype_arrays if state["ptype"] else None,
     )
-
     manifest_chunks = []
+    for chunk in chunks:
+        md = chunk["manifest_data"]
+        filename = md["file"]
+        manifest_chunks.append(md)
+        signature = tuple(md["forecast_steps"])
+        if state["published"].get(filename) == signature:
+            continue  # already uploaded exactly like this
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=GZIP_THREADS) as gz_pool:
-        gz_futures = []
-        for chunk in chunks:
-            filename = chunk["manifest_data"]["file"]
-            filepath = os.path.join(output_dist_dir, filename)
+        filepath = os.path.join(stage_dir, filename)
+        if filename.endswith(".bin"):
+            _gzip_to_file(filepath, chunk["array"].tobytes())
+            ptype_filename = md.get("ptype_file")
+            if ptype_filename and "ptype_array" in chunk:
+                _gzip_to_file(os.path.join(stage_dir, ptype_filename), chunk["ptype_array"].tobytes())
+        elif filename.endswith(".webp"):
+            cv2.imwrite(filepath, chunk["array"], [int(cv2.IMWRITE_WEBP_QUALITY), 101])
+        else:
+            cv2.imwrite(filepath, chunk["array"], [int(cv2.IMWRITE_PNG_COMPRESSION), 6])
+        state["staged"][filename] = signature
 
-            if filename.endswith(".bin"):
-                gz_futures.append(gz_pool.submit(_gzip_to_file, filepath, chunk["array"].tobytes()))
-                ptype_filename = chunk["manifest_data"].get("ptype_file")
-                if ptype_filename and "ptype_array" in chunk:
-                    gz_futures.append(gz_pool.submit(
-                        _gzip_to_file,
-                        os.path.join(output_dist_dir, ptype_filename),
-                        chunk["ptype_array"].tobytes(),
-                    ))
-            elif filename.endswith(".webp"):
-                cv2.imwrite(filepath, chunk["array"], [int(cv2.IMWRITE_WEBP_QUALITY), 101])
-            else:
-                cv2.imwrite(filepath, chunk["array"], [int(cv2.IMWRITE_PNG_COMPRESSION), 6])
-
-            manifest_chunks.append(chunk["manifest_data"])
-
-        for fut in gz_futures:
-            fut.result()
-    phases["volumes+gzip"] = time.perf_counter() - t0
-
+    # --- manifests ---
     manifest = {
         "model": MODEL_NAME,
-        "parameter": param_config["id"],
-        "name": param_config.get("name", param_config["id"]),
+        "parameter": pid,
+        "name": param_config.get("name", pid),
         "unit": param_config.get("unit", ""),
         "scaling": param_config.get("scaling", {}),
-        "run": f"{CHOSEN_RUN}z",
+        "run": f"{chosen_run}z",
         "date": target_date,
         "init_time": init_time_iso,
         "type": "volume_chunked",
-        "total_frames": len(steps_written),
+        "total_frames": len(sorted_steps),
+        "expected_frames": expected_frames,
+        "complete": bool(final),
         "frame_width": frame_w,
         "frame_height": frame_h,
         "grid": HRRR_GRID_META,
         "temp_min_k": param_config.get("min_val", param_config.get("scaling", {}).get("min_val", 0.0)),
         "temp_max_k": param_config.get("max_val", param_config.get("scaling", {}).get("max_val", 255.0)),
         "chunks": manifest_chunks,
-        "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat() + "Z"
+        "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat() + "Z",
     }
-
-    run_manifest_filename = patterns["run_manifest"].format(
-        model=MODEL_NAME, param=param_config["id"], date=target_date, run=CHOSEN_RUN.lower()
-    )
-
-    manifest_files_to_write = ["manifest.json", run_manifest_filename]
-
-    if "latest_manifest" in patterns:
-        latest_manifest_filename = patterns["latest_manifest"].format(
-            model=MODEL_NAME, param=param_config["id"]
-        )
-        manifest_files_to_write.append(latest_manifest_filename)
-
-    for m_fname in manifest_files_to_write:
-        m_path = os.path.join(output_dist_dir, m_fname)
-        with open(m_path, 'w') as f:
+    names = [patterns["run_manifest"].format(model=MODEL_NAME, param=pid, date=target_date, run=chosen_run.lower())]
+    if publish_latest and "latest_manifest" in patterns:
+        names.append(patterns["latest_manifest"].format(model=MODEL_NAME, param=pid))
+    names.append("manifest.json")
+    for name in names:
+        with open(os.path.join(stage_dir, name), "w") as f:
             json.dump(manifest, f, indent=2)
 
-    print(f"\n🎉 [{param_config['id']}] HRRR assets ready in {output_dist_dir}/")
 
-    t0 = time.perf_counter()
-    upload_to_huggingface(output_dist_dir, repo_id=DEFAULT_HF_REPO)
-    phases["hf_upload"] = time.perf_counter() - t0
+def publish_batch(states, configs, stage_dir, target_date, chosen_run, init_time_iso, expected_frames, final):
+    """Writes every changed parameter into ONE staging folder and uploads it as ONE Hugging Face commit."""
+    os.makedirs(stage_dir, exist_ok=True)
+    for key, state in states.items():
+        if state["dirty"] or final:
+            try:
+                write_param_outputs(state, configs[key], stage_dir, target_date, chosen_run, init_time_iso, expected_frames, final)
+            except Exception as e:
+                print(f"  ❌ [{key}] could not write outputs: {e}")
+            state["dirty"] = False
 
-    try:
-        shutil.rmtree(output_dist_dir)
-        print(f"  ✅ [{param_config['id']}] Cleanup complete.")
-    except Exception as e:
-        print(f"  ❌ [{param_config['id']}] Failed to delete temp directory: {e}")
+    ok = upload_to_huggingface(stage_dir, repo_id=DEFAULT_HF_REPO)
+    if ok:
+        for state in states.values():
+            state["published"].update(state["staged"])
+            state["staged"] = {}
+        shutil.rmtree(stage_dir, ignore_errors=True)
+    return ok
 
-    _print_timing(param_config["id"], phases, time.perf_counter() - t_total)
+
+def run_live_pipeline(param_keys, custom_run=None, custom_date=None):
+    """Live mode: wait for each forecast hour to appear on S3, process every parameter for it, publish, repeat."""
+    target_date, chosen_run = choose_run(custom_run, custom_date)
+    all_steps = forecast_steps_for_run(chosen_run)
+    init_time_iso = f"{target_date[:4]}-{target_date[4:6]}-{target_date[6:]}T{chosen_run}:00:00Z"
+    configs = {k: load_parameter_config(k) for k in param_keys}
+    states = {k: new_param_state() for k in param_keys}
+
+    print(f"🌍 LIVE HRRR run {chosen_run}z on {target_date} | {len(all_steps)} forecast hours | params: {param_keys}", flush=True)
+
+    for f in glob.glob(f"{MODEL_NAME}_*_*.grib2"):
+        try: os.remove(f)
+        except Exception: pass
+    shutil.rmtree(STAGE_DIR, ignore_errors=True)
+
+    pending = list(all_steps)
+    last_progress = time.time()
+    last_upload_ok = True
+    t_run = time.perf_counter()
+
+    with concurrent.futures.ProcessPoolExecutor(max_workers=min(MAX_CONCURRENT_WORKERS, 8)) as pool:
+        while pending:
+            # Hours land on S3 in order: take the ones that are ready, stop at the first that isn't.
+            ready = []
+            for s in pending:
+                if len(ready) >= MAX_STEPS_PER_BATCH or not hrrr_step_ready(target_date, chosen_run, s):
+                    break
+                ready.append(s)
+
+            if not ready:
+                if time.time() - last_progress > STALL_TIMEOUT_MINUTES * 60:
+                    print(f"⚠️ No new forecast hour for {STALL_TIMEOUT_MINUTES} min. Stopping with {len(all_steps) - len(pending)}/{len(all_steps)} hours done.", flush=True)
+                    break
+                time.sleep(POLL_SECONDS)
+                continue
+
+            last_progress = time.time()
+            t_batch = time.perf_counter()
+            jobs = {}
+            for s in ready:
+                for k in param_keys:
+                    st = states[k]
+                    if s not in st["results"] and st["attempts"].get(s, 0) < MAX_STEP_ATTEMPTS:
+                        fut = pool.submit(fetch_and_process_step, target_date, chosen_run, s, configs[k], MODEL_NAME)
+                        jobs[fut] = (k, s)
+
+            for fut in concurrent.futures.as_completed(jobs):
+                k, s = jobs[fut]
+                st = states[k]
+                try:
+                    _, arr, packed, ptype_arr = fut.result()
+                except Exception as e:
+                    print(f"  ❌ [{k}] F{s:02d} crashed: {e}", flush=True)
+                    arr = packed = ptype_arr = None
+                if arr is None:
+                    st["attempts"][s] = st["attempts"].get(s, 0) + 1
+                    continue
+                st["results"][s] = arr
+                if packed and packed["props"]:
+                    st["contours"][s] = packed
+                if ptype_arr is not None:
+                    st["ptype"][s] = ptype_arr
+                st["dirty"] = True
+
+            # A hour is finished once every parameter either has it or has used up its attempts.
+            unresolved = False
+            for s in ready:
+                done = all(s in states[k]["results"] or states[k]["attempts"].get(s, 0) >= MAX_STEP_ATTEMPTS for k in param_keys)
+                if done:
+                    pending.remove(s)
+                    for k in param_keys:
+                        if s not in states[k]["results"]:
+                            print(f"  ⚠️ [{k}] giving up on F{s:02d}", flush=True)
+                else:
+                    unresolved = True
+
+            final = not pending
+            if any(st["dirty"] for st in states.values()) or final:
+                last_upload_ok = publish_batch(states, configs, STAGE_DIR, target_date, chosen_run, init_time_iso, len(all_steps), final)
+
+            print(f"⏱️ Batch F{ready[0]:02d}-F{ready[-1]:02d} took {time.perf_counter() - t_batch:.1f}s | "
+                  f"{len(all_steps) - len(pending)}/{len(all_steps)} hours done", flush=True)
+            if unresolved:
+                time.sleep(POLL_SECONDS)  # give a hour that failed to download a moment before retrying
+
+    total_frames = sum(len(st["results"]) for st in states.values())
+    if total_frames == 0:
+        print("❌ No frames were processed.", flush=True)
+        sys.exit(1)
+
+    # Make sure the final state is on Hugging Face (also covers a run that stopped early or a failed upload).
+    if not last_upload_ok or pending:
+        for st in states.values():
+            st["dirty"] = True
+        publish_batch(states, configs, STAGE_DIR, target_date, chosen_run, init_time_iso, len(all_steps), final=not pending)
+
+    print(f"\n🎉 Run {chosen_run}z {target_date} finished in {time.perf_counter() - t_run:.0f}s", flush=True)
+    prune_old_huggingface_runs(repo_id=DEFAULT_HF_REPO, days_to_keep=2)
 
 
 if __name__ == "__main__":
@@ -958,32 +1006,5 @@ if __name__ == "__main__":
         else:
             target_params = ["2t"]
 
-    print(f"🚀 Launching HRRR Pipeline for Parameters: {target_params}")
-
-    batch_size = MAX_CONCURRENT_PARAMS
-    t_run = time.perf_counter()
-
-    for i in range(0, len(target_params), batch_size):
-        batch = target_params[i:i + batch_size]
-        batch_num = (i // batch_size) + 1
-        total_batches = math.ceil(len(target_params) / batch_size)
-        t_batch = time.perf_counter()
-
-        print(f"\n📦 [Batch {batch_num}/{total_batches}] Running {len(batch)} HRRR parameter(s): {batch}")
-
-        with concurrent.futures.ProcessPoolExecutor(max_workers=len(batch)) as executor:
-            futures = {executor.submit(run_master_pipeline, param, custom_run, custom_date): param for param in batch}
-            for future in concurrent.futures.as_completed(futures):
-                param = futures[future]
-                try:
-                    future.result()
-                    print(f"✅ Finished HRRR parameter: {param}")
-                except Exception as e:
-                    print(f"❌ Error processing HRRR parameter '{param}': {e}")
-
-        print(f"⏱️ Batch {batch_num}/{total_batches} took {time.perf_counter() - t_batch:.1f}s", flush=True)
-
-    print("\n🎉 ALL HRRR PARAMETERS COMPLETED!")
-    t_p = time.perf_counter()
-    prune_old_huggingface_runs(repo_id=DEFAULT_HF_REPO, days_to_keep=2)
-    print(f"⏱️ prune {time.perf_counter() - t_p:.1f}s | pipeline total {time.perf_counter() - t_run:.1f}s", flush=True)
+    print(f"🚀 Launching HRRR live pipeline for parameters: {target_params}", flush=True)
+    run_live_pipeline(target_params, custom_run, custom_date)
