@@ -28,7 +28,7 @@ sys.stdout.reconfigure(line_buffering=True)
 
 # HRRR forecast hours: the 00/06/12/18z cycles run hourly out to F48; every other cycle stops at F18.
 EXTENDED_RUNS = {"00", "06", "12", "18"}
-PREFER_EXTENDED_RUNS = True   # auto mode: use the newest started 48h run (up to EXTENDED_LOOKBACK_HOURS old) over a newer 18h run
+PREFER_EXTENDED_RUNS = False  # auto mode: use the newest started 48h run (up to EXTENDED_LOOKBACK_HOURS old) over a newer 18h run
 EXTENDED_LOOKBACK_HOURS = 7
 NORMAL_LOOKBACK_HOURS = 3
 MODEL_NAME = "hrrr"
@@ -38,7 +38,7 @@ POLL_SECONDS = 20           # how often to look for the next forecast hour on S3
 STALL_TIMEOUT_MINUTES = 45  # give up if no new forecast hour appears for this long
 MAX_STEPS_PER_BATCH = 6     # forecast hours processed + uploaded together (catch-up uses several, live usually 1)
 MAX_STEP_ATTEMPTS = 3       # tries per (parameter, forecast hour) before skipping it
-LATEST_MIN_FRAMES = 1       # the "latest" manifest/contours only switch to a new run once it has this many hours
+LATEST_MIN_FRAMES = 6       # the "latest" manifest/contours only switch to a new run once it has this many hours
 STAGE_DIR = "run_hrrr_stage"
 
 
@@ -730,6 +730,25 @@ def find_latest_started_run(now_utc, max_hours_back, extended_only=False):
     return None
 
 
+_NEWER_RUN_SEEN = {"yes": False}
+
+
+def newer_run_started(target_date, chosen_run):
+    """True once any later HRRR run has started on S3. Only the newest run may move the 'latest' pointers,
+    so a long run that is still finishing can never overwrite a newer run."""
+    if _NEWER_RUN_SEEN["yes"]:
+        return True
+    t = datetime.datetime.strptime(f"{target_date}{chosen_run}", "%Y%m%d%H").replace(tzinfo=datetime.timezone.utc)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    t += datetime.timedelta(hours=1)
+    while t <= now:
+        if hrrr_step_ready(t.strftime("%Y%m%d"), t.strftime("%H"), 0):
+            _NEWER_RUN_SEEN["yes"] = True
+            return True
+        t += datetime.timedelta(hours=1)
+    return False
+
+
 def choose_run(custom_run, custom_date):
     if custom_run and custom_date:
         return str(custom_date), str(custom_run).zfill(2)
@@ -757,7 +776,7 @@ def new_param_state():
     }
 
 
-def write_param_outputs(state, param_config, stage_dir, target_date, chosen_run, init_time_iso, expected_frames, final):
+def write_param_outputs(state, param_config, stage_dir, target_date, chosen_run, init_time_iso, expected_frames, final, latest_allowed=True):
     """Writes this parameter's current files into stage_dir. Only chunk files whose contents changed are written."""
     patterns = param_config["filename_patterns"]
     pid = param_config["id"]
@@ -766,7 +785,7 @@ def write_param_outputs(state, param_config, stage_dir, target_date, chosen_run,
         return
     frame_arrays = [state["results"][s] for s in sorted_steps]
     ptype_arrays = [state["ptype"].get(s) for s in sorted_steps]
-    publish_latest = final or len(sorted_steps) >= LATEST_MIN_FRAMES
+    publish_latest = latest_allowed and (final or len(sorted_steps) >= LATEST_MIN_FRAMES)
 
     # --- contours (one file per run holding every step so far) ---
     contour_steps = state["contours"]
@@ -863,10 +882,11 @@ def write_param_outputs(state, param_config, stage_dir, target_date, chosen_run,
 def publish_batch(states, configs, stage_dir, target_date, chosen_run, init_time_iso, expected_frames, final):
     """Writes every changed parameter into ONE staging folder and uploads it as ONE Hugging Face commit."""
     os.makedirs(stage_dir, exist_ok=True)
+    latest_allowed = not newer_run_started(target_date, chosen_run)
     for key, state in states.items():
         if state["dirty"] or final:
             try:
-                write_param_outputs(state, configs[key], stage_dir, target_date, chosen_run, init_time_iso, expected_frames, final)
+                write_param_outputs(state, configs[key], stage_dir, target_date, chosen_run, init_time_iso, expected_frames, final, latest_allowed)
             except Exception as e:
                 print(f"  ❌ [{key}] could not write outputs: {e}")
             state["dirty"] = False
