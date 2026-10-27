@@ -52,7 +52,7 @@
       "level": "surface",
       "idx_search": ":CAPE:surface:",
       "type": "fc",
-      "unit": "J kg^-1",
+      "unit": "J/kg",
       "scaling": {
         "mode": "linear",
         "min_val": 0.0,
