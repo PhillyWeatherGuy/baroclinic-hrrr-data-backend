@@ -44,6 +44,29 @@
         "latest_manifest": "{model}_{param}_manifest.json"
       }
     },
+    "cape": {
+      "id": "cape",
+      "name": "Surface-Based CAPE",
+      "file_type": "sfc",
+      "grib_param": "CAPE",
+      "level": "surface",
+      "idx_search": ":CAPE:surface:",
+      "type": "fc",
+      "unit": "J kg^-1",
+      "scaling": {
+        "mode": "linear",
+        "min_val": 0.0,
+        "max_val": 5000.0
+      },
+      "contours": [],
+      "filename_patterns": {
+        "volume": "{model}_{param}_{date}_{run}z_volume_{chunk_idx}.bin",
+        "run_contours": "{model}_{param}_{date}_{run}z_contours.json",
+        "latest_contours": "{model}_{param}_contours.json",
+        "run_manifest": "{model}_{param}_{date}_{run}z_manifest.json",
+        "latest_manifest": "{model}_{param}_manifest.json"
+      }
+    },
     "tp": {
       "id": "tp",
       "name": "Total Accumulated Precipitation",
