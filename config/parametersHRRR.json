@@ -68,11 +68,211 @@
         "latest_manifest": "{model}_{param}_manifest.json"
       }
     },
+    "tp_1h": {
+      "id": "tp_1h",
+      "name": "1-Hour Accumulated Precipitation",
+      "file_type": "sfc",
+      "grib_param": "APCP",
+      "interval_hours": 1,
+      "level": "surface",
+      "idx_search": ":APCP:surface:",
+      "type": "fc",
+      "unit": "in",
+      "scaling": {
+        "mode": "piecewise",
+        "unit_multiplier": 0.0393701,
+        "val_points": [0.0, 1.0, 10.0, 50.0],
+        "byte_points": [0, 100, 200, 255]
+      },
+      "contours": [],
+      "filename_patterns": {
+        "volume": "{model}_{param}_{date}_{run}z_volume_{chunk_idx}.bin",
+        "run_contours": "{model}_{param}_{date}_{run}z_contours.json",
+        "latest_contours": "{model}_{param}_contours.json",
+        "run_manifest": "{model}_{param}_{date}_{run}z_manifest.json",
+        "latest_manifest": "{model}_{param}_manifest.json"
+      }
+    },
+    "tp_3h": {
+      "id": "tp_3h",
+      "name": "3-Hour Accumulated Precipitation",
+      "file_type": "sfc",
+      "grib_param": "APCP",
+      "interval_hours": 3,
+      "level": "surface",
+      "idx_search": ":APCP:surface:",
+      "type": "fc",
+      "unit": "in",
+      "scaling": {
+        "mode": "piecewise",
+        "unit_multiplier": 0.0393701,
+        "val_points": [0.0, 1.0, 10.0, 50.0],
+        "byte_points": [0, 100, 200, 255]
+      },
+      "contours": [],
+      "filename_patterns": {
+        "volume": "{model}_{param}_{date}_{run}z_volume_{chunk_idx}.bin",
+        "run_contours": "{model}_{param}_{date}_{run}z_contours.json",
+        "latest_contours": "{model}_{param}_contours.json",
+        "run_manifest": "{model}_{param}_{date}_{run}z_manifest.json",
+        "latest_manifest": "{model}_{param}_manifest.json"
+      }
+    },
+    "tp_6h": {
+      "id": "tp_6h",
+      "name": "6-Hour Accumulated Precipitation",
+      "file_type": "sfc",
+      "grib_param": "APCP",
+      "interval_hours": 6,
+      "level": "surface",
+      "idx_search": ":APCP:surface:",
+      "type": "fc",
+      "unit": "in",
+      "scaling": {
+        "mode": "piecewise",
+        "unit_multiplier": 0.0393701,
+        "val_points": [0.0, 1.0, 10.0, 50.0],
+        "byte_points": [0, 100, 200, 255]
+      },
+      "contours": [],
+      "filename_patterns": {
+        "volume": "{model}_{param}_{date}_{run}z_volume_{chunk_idx}.bin",
+        "run_contours": "{model}_{param}_{date}_{run}z_contours.json",
+        "latest_contours": "{model}_{param}_contours.json",
+        "run_manifest": "{model}_{param}_{date}_{run}z_manifest.json",
+        "latest_manifest": "{model}_{param}_manifest.json"
+      }
+    },
+    "tp_24h": {
+      "id": "tp_24h",
+      "name": "24-Hour Accumulated Precipitation",
+      "file_type": "sfc",
+      "grib_param": "APCP",
+      "interval_hours": 24,
+      "level": "surface",
+      "idx_search": ":APCP:surface:",
+      "type": "fc",
+      "unit": "in",
+      "scaling": {
+        "mode": "piecewise",
+        "unit_multiplier": 0.0393701,
+        "val_points": [0.0, 1.0, 10.0, 50.0],
+        "byte_points": [0, 100, 200, 255]
+      },
+      "contours": [],
+      "filename_patterns": {
+        "volume": "{model}_{param}_{date}_{run}z_volume_{chunk_idx}.bin",
+        "run_contours": "{model}_{param}_{date}_{run}z_contours.json",
+        "latest_contours": "{model}_{param}_contours.json",
+        "run_manifest": "{model}_{param}_{date}_{run}z_manifest.json",
+        "latest_manifest": "{model}_{param}_manifest.json"
+      }
+    },
     "asnow": {
       "id": "asnow",
       "name": "Total Accumulated Snowfall",
       "file_type": "sfc",
       "grib_param": "ASNOW",
+      "level": "surface",
+      "idx_search": ":ASNOW:surface:",
+      "type": "fc",
+      "unit": "in",
+      "scaling": {
+        "mode": "piecewise",
+        "unit_multiplier": 39.3701,
+        "val_points": [0.0, 1.0, 10.0, 36.0, 150.0],
+        "byte_points": [0, 100, 200, 226, 255]
+      },
+      "contours": [],
+      "filename_patterns": {
+        "volume": "{model}_{param}_{date}_{run}z_volume_{chunk_idx}.bin",
+        "run_contours": "{model}_{param}_{date}_{run}z_contours.json",
+        "latest_contours": "{model}_{param}_contours.json",
+        "run_manifest": "{model}_{param}_{date}_{run}z_manifest.json",
+        "latest_manifest": "{model}_{param}_manifest.json"
+      }
+    },
+    "asnow_1h": {
+      "id": "asnow_1h",
+      "name": "1-Hour Accumulated Snowfall",
+      "file_type": "sfc",
+      "grib_param": "ASNOW",
+      "interval_hours": 1,
+      "level": "surface",
+      "idx_search": ":ASNOW:surface:",
+      "type": "fc",
+      "unit": "in",
+      "scaling": {
+        "mode": "piecewise",
+        "unit_multiplier": 39.3701,
+        "val_points": [0.0, 1.0, 10.0, 36.0, 150.0],
+        "byte_points": [0, 100, 200, 226, 255]
+      },
+      "contours": [],
+      "filename_patterns": {
+        "volume": "{model}_{param}_{date}_{run}z_volume_{chunk_idx}.bin",
+        "run_contours": "{model}_{param}_{date}_{run}z_contours.json",
+        "latest_contours": "{model}_{param}_contours.json",
+        "run_manifest": "{model}_{param}_{date}_{run}z_manifest.json",
+        "latest_manifest": "{model}_{param}_manifest.json"
+      }
+    },
+    "asnow_3h": {
+      "id": "asnow_3h",
+      "name": "3-Hour Accumulated Snowfall",
+      "file_type": "sfc",
+      "grib_param": "ASNOW",
+      "interval_hours": 3,
+      "level": "surface",
+      "idx_search": ":ASNOW:surface:",
+      "type": "fc",
+      "unit": "in",
+      "scaling": {
+        "mode": "piecewise",
+        "unit_multiplier": 39.3701,
+        "val_points": [0.0, 1.0, 10.0, 36.0, 150.0],
+        "byte_points": [0, 100, 200, 226, 255]
+      },
+      "contours": [],
+      "filename_patterns": {
+        "volume": "{model}_{param}_{date}_{run}z_volume_{chunk_idx}.bin",
+        "run_contours": "{model}_{param}_{date}_{run}z_contours.json",
+        "latest_contours": "{model}_{param}_contours.json",
+        "run_manifest": "{model}_{param}_{date}_{run}z_manifest.json",
+        "latest_manifest": "{model}_{param}_manifest.json"
+      }
+    },
+    "asnow_6h": {
+      "id": "asnow_6h",
+      "name": "6-Hour Accumulated Snowfall",
+      "file_type": "sfc",
+      "grib_param": "ASNOW",
+      "interval_hours": 6,
+      "level": "surface",
+      "idx_search": ":ASNOW:surface:",
+      "type": "fc",
+      "unit": "in",
+      "scaling": {
+        "mode": "piecewise",
+        "unit_multiplier": 39.3701,
+        "val_points": [0.0, 1.0, 10.0, 36.0, 150.0],
+        "byte_points": [0, 100, 200, 226, 255]
+      },
+      "contours": [],
+      "filename_patterns": {
+        "volume": "{model}_{param}_{date}_{run}z_volume_{chunk_idx}.bin",
+        "run_contours": "{model}_{param}_{date}_{run}z_contours.json",
+        "latest_contours": "{model}_{param}_contours.json",
+        "run_manifest": "{model}_{param}_{date}_{run}z_manifest.json",
+        "latest_manifest": "{model}_{param}_manifest.json"
+      }
+    },
+    "asnow_24h": {
+      "id": "asnow_24h",
+      "name": "24-Hour Accumulated Snowfall",
+      "file_type": "sfc",
+      "grib_param": "ASNOW",
+      "interval_hours": 24,
       "level": "surface",
       "idx_search": ":ASNOW:surface:",
       "type": "fc",
