@@ -149,6 +149,17 @@ def load_parameter_config(param_key="2t"):
     raise FileNotFoundError(f"Parameter '{param_key}' not found in {CONFIG_FILE_PATH}")
 
 
+def get_interval_hours(param_config):
+    """Returns accumulation interval window in hours (e.g. 1, 3, 6, 24), or None."""
+    if "interval_hours" in param_config:
+        return int(param_config["interval_hours"])
+    pid = param_config.get("id", "").lower()
+    match = re.search(r'[-_]?(1|3|6|24)h(?:r)?$', pid)
+    if match:
+        return int(match.group(1))
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Contours: vectorized extraction + CTV2 binary packing
 # ---------------------------------------------------------------------------
@@ -456,7 +467,7 @@ def convert_units(raw_arr, cfg):
 
 
 @timed("decode_all")
-def process_grib_to_array(grib_path, param_config, want_raster=True, target_date=None, valid_time=None):
+def process_grib_to_array(grib_path, param_config, want_raster=True, target_date=None, valid_time=None, want_raw=False):
     raw_arr, lats, lons = read_native_field(grib_path, param_config["grib_param"])
 
     if param_config.get("category_mode"):
@@ -473,6 +484,9 @@ def process_grib_to_array(grib_path, param_config, want_raster=True, target_date
         param_config.get("contours", []),
         param_config.get("contours_settings")
     )
+
+    if want_raw:
+        return np.nan_to_num(raw_arr, nan=0.0).astype(np.float32), contour_levels
 
     arr_8bit = normalize_array(raw_arr, param_config) if want_raster else None
     return arr_8bit, contour_levels
@@ -539,7 +553,10 @@ def fetch_and_process_step(target_date, chosen_run, step, param_config, model_na
             has_contours = bool(contour_sources)
             raster_config = {**param_config, "contours": []} if has_contours else param_config
             valid_time = datetime.datetime.strptime(f"{target_date}{chosen_run}", "%Y%m%d%H") + datetime.timedelta(hours=step)
-            frame_arr, contour_levels = process_grib_to_array(grib_file, raster_config, target_date=target_date, valid_time=valid_time)
+            is_interval = get_interval_hours(param_config) is not None
+            frame_arr, contour_levels = process_grib_to_array(
+                grib_file, raster_config, target_date=target_date, valid_time=valid_time, want_raw=is_interval
+            )
             contour_levels = list(contour_levels)
             ptype_arr = None
 
@@ -766,7 +783,7 @@ def choose_run(custom_run, custom_date):
 
 def new_param_state():
     return {
-        "results": {},      # step -> uint8 frame
+        "results": {},      # step -> raw float32 or uint8 frame
         "contours": {},     # step -> packed contour levels
         "ptype": {},        # step -> uint8 p-type frame
         "attempts": {},     # step -> failed attempts so far
@@ -783,7 +800,25 @@ def write_param_outputs(state, param_config, stage_dir, target_date, chosen_run,
     sorted_steps = sorted(state["results"])
     if not sorted_steps:
         return
-    frame_arrays = [state["results"][s] for s in sorted_steps]
+
+    # 🌟 Interval Accumulation Differencing (1h, 3h, 6h, 24h Snowfall / Precip)
+    interval_h = get_interval_hours(param_config)
+    if interval_h:
+        frame_arrays = []
+        for s in sorted_steps:
+            target_prev = s - interval_h
+            if target_prev <= 0:
+                prev_arr = state["results"].get(0, 0.0)
+            else:
+                candidates = [st for st in sorted_steps if st <= target_prev]
+                prev_s = max(candidates) if candidates else None
+                prev_arr = state["results"][prev_s] if prev_s is not None else 0.0
+
+            diff = np.maximum(0.0, state["results"][s] - prev_arr)
+            frame_arrays.append(normalize_array(diff, param_config))
+    else:
+        frame_arrays = [state["results"][s] for s in sorted_steps]
+
     ptype_arrays = [state["ptype"].get(s) for s in sorted_steps]
     publish_latest = latest_allowed and (final or len(sorted_steps) >= LATEST_MIN_FRAMES)
 
